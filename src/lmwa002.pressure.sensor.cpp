@@ -11,7 +11,7 @@ x1Val and x2Val must be calibrated to the voltage readings at
 
 //This ProgramID is the name of the sketch and identifies what code is running on the D1 Mini
 const char* ProgramID = "LMWA002";
-const char* SensorType = "Water Press.";
+const char* SensorType = "Pressure";
 int SerialOn = 0;
 
 #include <SPI.h>
