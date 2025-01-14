@@ -10,19 +10,33 @@ x1Val and x2Val must be calibrated to the voltage readings at
 *********************************************************************/
 
 //This ProgramID is the name of the sketch and identifies what code is running on the D1 Mini
-const char* ProgramID = "LMWA002";
+const char* ProgramID = "LMWA.prs.02";
 const char* SensorType = "Pressure";
+const char* mqtt_topic = "pressure/02";
+const char* mqtt_unit = "PSI";
+const char* mqtt_server_init = "192.168.12.165";
+const char* mqtt_user = "mqttuser";
+const char* mqtt_password = "Lafayette123!";
 int SerialOn = 0;
 
-#include <SPI.h>
-#include <Wire.h>
+//OTA Stuff
+#include <ArduinoOTA.h>
 
-//Function definitions
-float roundoff(float value, unsigned char prec);
-void httpRequest();
+//Wifi Stuff
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <WiFiUdp.h> // Uncomment for D1 Mini ESP8266
+//const char *ssid =	"LMWA-PumpHouse";		// cannot be longer than 32 characters!
+//const char *pass =	"ds42396xcr5";		//
+const char *ssid =	"WiFiFoFum";		// cannot be longer than 32 characters!
+const char *pass =	"6316EarlyGlow";		//
+WiFiClient wifi_client;
+String wifistatustoprint;
 void printWifiStatus();
 
 //For 1.3in displays
+#include <SPI.h>
+#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 #define i2c_Address 0x3c //initialize with the I2C addr 0x3C Typically eBay OLED's
@@ -30,21 +44,6 @@ void printWifiStatus();
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET -1   //   QT-PY / XIAO
 Adafruit_SH1106G display = Adafruit_SH1106G(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-//Wifi Stuff
-#include <ESP8266WiFi.h>
-#include <PubSubClient.h>
-//const char *ssid =	"LMWA-PumpHouse";		// cannot be longer than 32 characters!
-//const char *pass =	"ds42396xcr5";		//
-const char *ssid =	"WiFiFoFum";		// cannot be longer than 32 characters!
-const char *pass =	"6316EarlyGlow";		//
-WiFiClient wifi_client;
-String wifistatustoprint;
-
-//Tago.io server address and device token
-char server[] = "api.tago.io";
-String Device_Token = "1c275a1c-27ee-42b0-b59b-d82e40de269d"; //d1_002_pressure_sensor Default token
-//String pressure_string = "";
 
 //Timing
 unsigned long currentMillis = 0;
@@ -55,10 +54,19 @@ int secsRemaining;
 int uptimeMinutes;
 char uptimeTotal[30];
 
+//MQTT Stuff
+#include <PubSubClient.h>
+void callback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+void sendMQTT(double mqtt_payload);
+const char* mqtt_server = mqtt_server_init;  //Your network's MQTT server (usually same IP address as Home Assistant server)
+PubSubClient pubsub_client(wifi_client);
+unsigned long lastMsg = 0;
+#define MSG_BUFFER_SIZE	(50)
+char msg[MSG_BUFFER_SIZE];
+int value = 0;
 
-unsigned long lastConnectionTime = 0;            // last time you connected to the server, in milliseconds
-unsigned long postingInterval = 10 * 1000; // delay between updates, in milliseconds
-
+// ********* Put your program's custom stuff below here ********** //
 
 //Data payload variables
 int counter = 1;
@@ -74,73 +82,32 @@ float transducerVal; // Raw analog value read from the Transducer
 float voltageVal; //Calculated Voltage from the Analog read of the Transducer
 float psi; //Calculated PSI
 
-//binary sensor stuff
-//#define BINARYPIN 13
+// ********* Put your program's custom stuff above here ********** //
 
-//MQTT Stuff
-void callback(char* topic, byte* payload, unsigned int length);
-void reconnect();
-void sendMQTT(double PowerReading);
-const char* mqtt_server = "homeassistant.local";  //Your network's MQTT server (usually same IP address as Home Assistant server)
-PubSubClient pubsub_client(wifi_client);
-unsigned long lastMsg = 0;
-#define MSG_BUFFER_SIZE	(50)
-char msg[MSG_BUFFER_SIZE];
-int value = 0;
 
 void setup() {
 
-
-  Serial.begin(115200);
-  while (!Serial) {
-    ;                     // wait for serial port to connect. Needed for native USB port only
-  }
-  Serial.println("SETUP");
-  Serial.println();
-
- //MQTT Setup
-  pubsub_client.setServer(mqtt_server, 1883);
-  pubsub_client.setCallback(callback);
-
-
-  //pinMode(BINARYPIN, INPUT_PULLUP);
+  Serial.begin(9600);
+  delay(1000);
+  Serial.println("\n\nBooting");
+  Serial.println(__FILE__);
 
   //1.3" OLED Setup
   delay(250); // wait for the OLED to power up
   display.begin(i2c_Address, true); // Address 0x3C default
- //display.setContrast (0); // dim display
- 
   display.display();
   delay(2000);
 
-  // Clear the buffer.
-  display.clearDisplay();
+  // Clear the buffer & start drawing
+  display.clearDisplay(); // Clear display
+  display.setTextColor(SH110X_WHITE);
+  display.drawPixel(64, 64, SH110X_WHITE); // draw a single pixel
+  display.display();   // Show the display buffer on the hardware.
+  delay(2000); // Wait a couple
+  display.clearDisplay(); // Clear display
 
-  // draw a single pixel
-  display.drawPixel(64, 64, SH110X_WHITE);
-  // Show the display buffer on the hardware.
-  // NOTE: You _must_ call display after making any drawing commands
-  // to make them visible on the display hardware!
-  display.display();
-  delay(2000);
-  display.clearDisplay();
-
-}
-
-void loop() {
-  currentMillis = millis();
-  delay (.01); //sample delay
-
-  uptimeSeconds=currentMillis/1000;
-  uptimeHours= uptimeSeconds/3600;
-  uptimeDays=uptimeHours/24;
-  secsRemaining=uptimeSeconds%3600;
-  uptimeMinutes=secsRemaining/60;
-  uptimeSeconds=secsRemaining%60;
-  sprintf(uptimeTotal,"Uptime %02dD:%02d:%02d:%02d",uptimeDays,uptimeHours,uptimeMinutes,uptimeSeconds);
-
-
-  //Wifi Stuff
+  //Wifi Setup Stuff
+  WiFi.mode(WIFI_STA);
   if (WiFi.status() != WL_CONNECTED) {
     
     //Write wifi connection to display
@@ -160,44 +127,120 @@ void loop() {
     Serial.print("Connecting to ");
     Serial.print(ssid);
     Serial.println("...");
-    WiFi.setHostname(ProgramID);
     WiFi.begin(ssid, pass);
+    WiFi.setHostname(ProgramID);
 
     //delay 8 seconds for effect
     delay(8000);
 
     if (WiFi.waitForConnectResult() != WL_CONNECTED){
+      Serial.println("WIFI NOT CONNECTED");
       return;
     }
 
     display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
     display.setCursor(0, 0);
-    display.println("Water Pressure Sensor\nDevice ID: d1_002");
-    display.setTextSize(1);
-    display.println(" ");
+    display.println("Booting Program ID:");
+    display.println(ProgramID);
+    display.println("Sensor Type:");
+    display.println(SensorType);
     display.println("Connected To WiFi:");
     display.println(ssid);
-    display.println(" ");
+    display.println(WiFi.localIP());
     display.display();
-
+    delay(5000);
     Serial.println("\n\nWiFi Connected! ");
-    printWifiStatus();
+  //  printWifiStatus();
 
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-    wifistatustoprint="Wifi Connected!";
-  }else{
-    wifistatustoprint="Womp, No Wifi!";
-  }
+  //OTA Setup Stuff
+  if(1){
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  // ArduinoOTA.setHostname("myesp8266");
+
+  // No authentication by default
+  // ArduinoOTA.setPassword((const char *)"123");
+
+  ArduinoOTA.onStart([]() {
+    display.clearDisplay();
+    Serial.println("Start OTA");
+    display.setCursor(0, 0);
+    display.println("Starting OTA!");
+    display.display();
+    });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd OTA - Rebooting!");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("OTA Done!"); display.println("Rebooting!");
+    display.display();
+    ESP.restart();
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("Progress: " + (progress / (total / 100)));
+    display.display();
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
+    //Start OTA
+  ArduinoOTA.begin();
+  Serial.println("OTA Listenerer Started");
+
+  }//End OTA Code Wrapper
+
+
+ //MQTT Setup
+  pubsub_client.setServer(mqtt_server, 1883);
+  pubsub_client.setCallback(callback);
+
+//Report done booting
+  Serial.println("Ready");
+  Serial.print("Hostname: ");
+  Serial.println(WiFi.getHostname());
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  
+  delay(5000);
+
+}//end setup()
+
+void loop() {
+
+  ArduinoOTA.handle(); // Start listening for OTA Updates
+
+  //Calculate Uptime
+  currentMillis = millis();
+  delay (.01); //sample delay
+  uptimeSeconds=currentMillis/1000;
+  uptimeHours= uptimeSeconds/3600;
+  uptimeDays=uptimeHours/24;
+  secsRemaining=uptimeSeconds%3600;
+  uptimeMinutes=secsRemaining/60;
+  uptimeSeconds=secsRemaining%60;
+  sprintf(uptimeTotal,"Uptime %02dD:%02d:%02d:%02d",uptimeDays,uptimeHours,uptimeMinutes,uptimeSeconds);
+
+  // *************** Put your program below here *********************//
 
   //perform reading and filter the value.
   transducerVal = (float)analogRead(SensorPin);  //raw Analog To Digital Converted (ADC) value from sensor
   filteredVal = (alpha * filteredVal) + ((1.0 - alpha) * transducerVal); // Low Pass Filter, smoothes out readings.
   voltageVal = (filteredVal * aRef) / 1023; //calculate voltage using smoothed sensor reading... 5.0 is system voltage, 1023 is resolution of the ADC...
   psi = (23.608 * voltageVal) - 20.446; // generated by Excel Scatterplot for transducer S/N 2405202308207
+  //Calibration Data: 0 PSI = .?v, 60 PSI = ?.??v, 64psi = ?.??v
 
   if(psi<0){
       Serial.println("PSI<0, Making it 0.");
@@ -213,6 +256,8 @@ void loop() {
     Serial.println("  ");
   }
   
+  // *************** Put your program above here *********************//  
+
   //Write values to the display
   
   display.clearDisplay(); // clear the display
@@ -222,7 +267,7 @@ void loop() {
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0, 0);
   display.print("Sensor: "); display.println(SensorType);
-  display.print("Prog. ID: "); display.println(ProgramID);
+  display.print("PrgmID: "); display.println(ProgramID);
   display.print("Raw: "); display.println(transducerVal);
   display.print("Filtered: "); display.println(filteredVal);
   display.print("Voltage: "); display.println(voltageVal);
@@ -232,63 +277,10 @@ void loop() {
 
   display.display(); // Write the buffer to the display
 
-  // if upload interval has passed since your last connection,
-  // then connect again and send data to tago.io
-
-  if(SerialOn){
-  Serial.print("currentMillis: "); Serial.println(currentMillis, 0);
-  Serial.print("lastConnectionTime: "); Serial.println(lastConnectionTime, 0);
-  Serial.print("PostingInterval: "); Serial.println(postingInterval, 0);
-  }
-
-  //if (currentMillis - lastConnectionTime > postingInterval) {
-  //  Serial.print("Time to post to tago.io at "); Serial.println(uptimeTotal);
-    // then, send data to Tago
-    //httpRequest();
-  //}
   sendMQTT(psi);
-  Serial.println();
+  if(SerialOn){Serial.println();};
   counter++;
-}
-
-// this method makes a HTTP connection to tago.io
-void httpRequest() {
-/*
-  Serial.println("Sending this Pressure:");
-  Serial.println(psi);
-
-    // close any connection before send a new request.
-    // This will free the socket on the WiFi shield
-    wifi_client.stop();
-
-    Serial.println("Starting connection to server for Pressure...");
-    // if you get a connection, report back via serial:
-    String PostPressure = String("{\"variable\":\"pressure\", \"value\":") + String(psi)+ String(",\"unit\":\"PSI\"}");
-    String Dev_token = String("Device-Token: ")+ String(Device_Token);
-    if (wifi_client.connect(server,80)) {                      // we will use non-secured connnection (HTTP) for tests
-    Serial.println("Connected to server");
-    // Make a HTTP request:
-    wifi_client.println("POST /data? HTTP/1.1");
-    wifi_client.println("Host: api.tago.io");
-    wifi_client.println("_ssl: false");                        // for non-secured connection, use this option "_ssl: false"
-    wifi_client.println(Dev_token);
-    wifi_client.println("Content-Type: application/json");
-    wifi_client.print("Content-Length: ");
-    wifi_client.println(PostPressure.length());
-    wifi_client.println();
-    wifi_client.println(PostPressure);
-    Serial.println("Pressure sent!\n");
-    }  else {
-      // if you couldn't make a connection:
-      Serial.println("Server connection failed.");
-    }
-
-    client.stop();
-
-    // note the time that the connection was made:
-    lastConnectionTime = currentMillis;
-    */
-}
+}//end loop()
 
 //this method prints wifi network details
 void printWifiStatus() {
@@ -312,7 +304,6 @@ void printWifiStatus() {
   Serial.println("");
 }
 
-
 //MQTT Callback
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
@@ -322,11 +313,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
-
 }
 
 //connect MQTT if not
 void reconnect() {
+  int mqtt_retries = 0;
   // Loop until we're reconnected
   while (!pubsub_client.connected()) {
     Serial.print("Attempting MQTT connection...");
@@ -337,20 +328,34 @@ void reconnect() {
     if (pubsub_client.connect(clientId.c_str(), "mqttuser", "Quik5ilver7")) {
       Serial.println("connected");
     } else {
+      mqtt_retries++;
       Serial.print("failed, rc=");
       Serial.print(pubsub_client.state());
       Serial.println(" try again in 5 seconds");
       // Wait 5 seconds before retrying
       delay(5000);
     }
+    if(mqtt_retries==2){
+      Serial.println("Too many retries. Looping.");
+      return;
+    }
   }
 }
 
-void sendMQTT(double PressureReading) {
+void sendMQTT(double mqtt_payload) {
 
   if (!pubsub_client.connected()) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("Sensor: "); display.println(SensorType);
+    display.print("Prog.ID: "); display.println(ProgramID);
+    display.println("\nMQTT Offline!\n");
+    display.print("Hostname: "); display.println(WiFi.getHostname());
+    display.print("IP: "); display.println(WiFi.localIP());
+    display.print(uptimeTotal);
+    display.display();
     reconnect();
-    Serial.println("Reconnect MQTT");
   }
 
   unsigned long now = millis();
@@ -358,18 +363,17 @@ void sendMQTT(double PressureReading) {
     lastMsg = now;
     ++value;
 
-  Serial.println("Sending alert via MQTT...");
-  Serial.println(PressureReading);
-
+    Serial.println("Sending alert via MQTT...");
+    Serial.print("Topic: "); Serial.print(mqtt_topic); Serial.print(" Payload: "); Serial.print(mqtt_payload); Serial.print(" Unit: "); Serial.println(mqtt_unit);
     //msg variable contains JSON string to send to MQTT server
     //snprintf (msg, MSG_BUFFER_SIZE, "\{\"amps\": %4.1f, \"humidity\": %4.1f\}", temperature, humidity);
-    snprintf (msg, MSG_BUFFER_SIZE, "\{\"PSI\": %4.2f\}", PressureReading);
+    snprintf (msg, MSG_BUFFER_SIZE, "\{\"%s\": %4.2f\}", mqtt_unit, mqtt_payload);
     //Due to a quirk with escaping special characters, if you're using an ESP8266 you will need to use this instead:
     //snprintf (msg, MSG_BUFFER_SIZE, "{\"temperature\": %4.1f, \"humidity\": %4.1f}", temperature, humidity);
 
-    Serial.print("Publish message: ");
-    Serial.println(msg);
-    pubsub_client.publish("PRESSURE01", msg);
+    Serial.print("Publishing message: "); Serial.println(msg);
+    pubsub_client.publish(mqtt_topic, msg);
+  }else{
+    Serial.println("MQTT Not Connected... Bail on loop!\n");
   }
-
 }
